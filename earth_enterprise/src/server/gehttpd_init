@@ -1,0 +1,137 @@
+#!/bin/bash
+#
+# Copyright 2017-2020 Google Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+#
+# Startup script for the Google Earth distributed Apache Web Server
+#
+
+# ---------- For RedHat based machines ----------
+# chkconfig: - 85 15
+# description: Apache is a World Wide Web server.  It is used to serve \
+#           HTML files and CGI.
+# processname: gehttpd
+# pidfile: /var/run/gehttpd.pid
+
+# ---------- For SUSE based machines ----------
+### BEGIN INIT INFO
+# Provides:        gehttpd
+# Required-Start: nscd
+# Should-Start:
+# Required-Stop:
+# Default-Start: 3 5
+# Default-Stop:
+# Description:        Start Google Earth Apache
+### END INIT INFO
+
+# Path to the apachectl script, server binary, and short-form for messages.
+prog=gehttpd
+httpd=/opt/google/gehttpd/bin/gehttpd
+apachectl=/opt/google/gehttpd/bin/apachectl
+pidfile=/opt/google/gehttpd/logs/httpd.pid
+
+# pick up any necessary environment variables
+if test -f /opt/google/gehttpd/bin/envvars; then
+  . /opt/google/gehttpd/bin/envvars
+fi
+
+if [ "$EUID" != "0" ] ; then
+    echo "$(basename "$0") must be run as root."
+    exit 1
+fi
+
+# Set this variable to a command that increases the maximum
+# number of file descriptors allowed per child process. This is
+# critical for configurations that use many file descriptors,
+# such as mass vhosting, or a multithreaded server.
+ULIMIT_MAX_FILES="ulimit -S -n `ulimit -H -n`"
+# --------------------                              --------------------
+# ||||||||||||||||||||   END CONFIGURATION SECTION  ||||||||||||||||||||
+
+# Set the maximum number of file descriptors allowed per child process.
+if [ "x$ULIMIT_MAX_FILES" != "x" ] ; then
+    $ULIMIT_MAX_FILES
+fi
+
+# Space separated list of arguments to pass to apache
+# (e.g. args='-DSSL' to turn on SSL)
+args=''
+
+# Variable where result of start/stop are stored for later return by
+# this script
+RETVAL=0
+
+echo "Google Earth Enterprise Server"
+
+start() {
+    echo -n $"Starting $prog: "
+    $apachectl start $args
+    RETVAL=$?
+}
+stop() {
+    echo -n $"Stopping $prog: "
+    $apachectl stop
+    RETVAL=$?
+}
+reload() {
+    echo -n $"Reloading $prog: "
+    $apachectl restart
+    RETVAL=$?
+}
+getstatus() {
+    echo -n $"Checking for httpd: "
+    $apachectl status
+    RETVAL=$?
+}
+
+# See how we were called.
+case "$1" in
+  start)
+    umask 0002
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  status)
+    getstatus
+    ;;
+  restart)
+    stop
+    sleep 2
+    start
+    ;;
+  condrestart)
+    if [ -f $pidfile ] ; then
+        stop
+    sleep 2
+        start
+    fi
+    ;;
+  reload)
+    umask 0002
+    reload
+    ;;
+  graceful|help|configtest)
+    $apachectl $@
+    RETVAL=$?
+    ;;
+  *)
+    echo $"Usage: $prog {start|stop|restart|condrestart|reload|status|fullstatus|graceful|help|configtest}"
+    exit 1
+esac
+
+exit $RETVAL

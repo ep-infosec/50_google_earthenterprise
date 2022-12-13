@@ -1,0 +1,307 @@
+// Copyright 2017 Google Inc.
+// Copyright 2020 The Open GEE Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//       http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#config Name      PacketGen
+#config Base      Composite
+#config Config    PacketGenConfig
+#config Subtype   PacketGen
+#config WithReuse 1
+#config HaveExtraUpdateInfo 1
+#config NoInputs 1
+
+
+// ===== PacketGenAsset.h =====
+#include <autoingest/.idl/storage/PacketGenConfig.h>
+
+
+// ===== PacketGenAsset.cpp =====
+
+
+
+// ===== PacketGenAssetD.h =====
+#include <InsetInfo.h>
+
+template <typename ProductAssetVersion>
+class PacketGenExtraUpdateArg {
+ public:
+  std::vector<const InsetInfo<ProductAssetVersion>*> insetInfo;
+  std::vector<const PacketGenInfo *> genInfo;
+  std::shared_ptr<OverlapCalculator<ProductAssetVersion>> calc;
+};
+
+// ===== PacketGenAssetD.cpp =====
+#include <autoingest/sysman/plugins/PacketLevelAssetD.h>
+#include <autoingest/plugins/RasterProductAsset.h>
+#include <autoingest/plugins/MercatorRasterProductAsset.h>
+#include <memory>
+
+template <typename ProductAssetVersion>
+void PacketGenAssetVersionImplD::UpdateChildren(
+    const PacketGenExtraUpdateArg<ProductAssetVersion> &extra) {
+  std::string assetRef = GetAssetRef();
+  unsigned int numLevels = config.coverage.numLevels();
+  if (numLevels == 0) {
+    throw khException(kh::tr("Internal Error: No levels to build"));
+  }
+
+  unsigned int numInsets = extra.insetInfo.size();
+  if (numInsets == 0) {
+    throw khException(kh::tr("Internal Error: No insets"));
+  }
+
+  std::vector<MutableAssetVersionD> kids;
+  kids.reserve(numLevels);
+
+  // Create my children giving them each a different level
+  // Go from end to begin so we can use the results from one level to make
+  // the next lower resolution level
+  unsigned int level = config.coverage.endLevel();
+  while (level > config.coverage.beginLevel()) {
+    --level;
+
+    // Determine which insets intersect us at this level
+    const khLevelCoverage levCov(config.coverage.levelCoverage(level));
+    std::vector< unsigned int>  neededIndexes;
+
+    neededIndexes.reserve(numInsets);
+    auto gencov = khInsetCoverage(levCov);
+    overlapEnvelope<ProductAssetVersion> env(
+        type,
+        extra.insetInfo,
+        numInsets,
+        config.beginMinifyLevel,
+        config.endMinifyLevel,
+        level);
+    extra.calc->setEnvelope(env);
+    neededIndexes = std::move(extra.calc->GetOverlapForLevel(gencov));
+
+    // Build most of PacketLevelConfig
+    PacketLevelConfig packetLevelConfig;
+    packetLevelConfig.coverage = levCov;
+    packetLevelConfig.minify =
+      ((level >= config.beginMinifyLevel) &&
+       (level < config.endMinifyLevel));
+    packetLevelConfig.skipTransparent =
+      (level >= config.beginSkipTransparentLevel);
+
+    if (type == AssetDefs::Terrain) {
+      if (level < config.beginSimplifyLevel) {
+        // normal processing
+        // decimate from 32x32 samples (4 @ 17x17 tmeshes)
+        packetLevelConfig.decimate   = true;
+        packetLevelConfig.sampleSize = TmeshQuadnodeResolution;
+      } else {
+        unsigned int diff = level - config.beginSimplifyLevel;
+        switch (diff) {
+          case 0:
+            // decimate from 16x16 samples (4 @ 9x9 tmeshes)
+            packetLevelConfig.decimate   = true;
+            packetLevelConfig.sampleSize = TmeshQuadnodeResolution/2;
+            break;
+          case 1:
+            // decimate from 8x8 samples (4 @ 5x5 tmeshes)
+            packetLevelConfig.decimate   = true;
+            packetLevelConfig.sampleSize = TmeshQuadnodeResolution/4;
+            break;
+          default:
+            // no-decimation from 4x4 samples (4 @ 3x3 tmeshes)
+            packetLevelConfig.decimate   = false;
+            packetLevelConfig.sampleSize = TmeshQuadnodeResolution/8;
+            break;
+        }
+      }
+    }
+
+    std::vector<SharedString> levInputs;
+    std::vector<AssetVersion> levInputVers;
+    if (!packetLevelConfig.minify) {
+      // ***** Normal Blend *****
+
+      // we cache the raster if we're in the appropriate range
+      // and if we've been told to (because we have alpha)
+      packetLevelConfig.cacheRaster =
+        (config.cacheRaster &&
+         (level > config.beginMinifyLevel) &&
+         (level <= config.endMinifyLevel));
+
+      // populate inputs and inputVers & config.insets
+      levInputs.reserve(neededIndexes.size());
+      levInputVers.reserve(neededIndexes.size());
+      packetLevelConfig.insets.reserve(neededIndexes.size());
+      packetLevelConfig.attributions.reserve(neededIndexes.size());
+
+      for (const auto& idx : neededIndexes) {
+        const InsetInfo<ProductAssetVersion> &inset(*extra.insetInfo[idx]);
+        levInputs.push_back(inset.combinedrp_->GetRef());
+        levInputVers.push_back(inset.combinedrp_);
+        packetLevelConfig.insets.push_back
+          (PacketLevelConfig::Inset(inset.dataRPFile,
+                                    inset.alphaRPFile,
+                                    SharedString(), /* cached blend */
+                                    SharedString()  /* cached blend alpha */));
+        std::string acquisitionDate = inset.resource_->GetAcquisitionDate();//.toStdString();
+
+        packetLevelConfig.attributions.push_back
+          (PacketLevelConfig::Attribution(
+              inset.dataRPFile,
+              acquisitionDate,
+              inset.combinedrp_->config.fuid_resource_));
+      }
+    } else {
+      // ***** Minify *****
+
+      // if we want to short circuit the merge with opaque product
+      // tiles, fill in the info about our top product
+      if (config.useOpaqueTopInsetInsteadOfMerge) {
+        packetLevelConfig.mergeTopDataRP =
+          extra.insetInfo.back()->dataRPFile;
+        packetLevelConfig.mergeTopAlphaRP =
+          extra.insetInfo.back()->alphaRPFile;
+      }
+
+      // we cache the raster only if we're in the appropriate range
+      // we no longer care if the burn inset has alpha
+      packetLevelConfig.cacheRaster =
+        ((level > config.beginMinifyLevel) &&
+         (level <= config.endMinifyLevel));
+
+      const unsigned int minifySrcLevel = level + 1;
+
+      // for attribution we care about everybody
+      packetLevelConfig.attributions.reserve(neededIndexes.size() + 1);
+      for (const auto& idx : neededIndexes) {
+        const InsetInfo<ProductAssetVersion> &inset(*extra.insetInfo[idx]);
+        std::string acquisitionDate = inset.resource_->GetAcquisitionDate();
+        packetLevelConfig.attributions.push_back
+          (PacketLevelConfig::Attribution(
+              inset.dataRPFile,
+              acquisitionDate,
+              inset.combinedrp_->config.fuid_resource_));
+      }
+
+
+      // for insets we only care about those that have done work at
+      // minifySrcLevel
+      std::vector< unsigned int>  mergeIndexes;
+      mergeIndexes.reserve(neededIndexes.size());
+
+      for (const auto& idx : neededIndexes) {
+        if (extra.genInfo[idx]->coverage.hasLevel(minifySrcLevel)) {
+          mergeIndexes.push_back(idx);
+        }
+      }
+
+      // populate inputs and inputVers & config.insets
+      packetLevelConfig.insets.reserve(mergeIndexes.size() + 1);
+      packetLevelConfig.insets.resize(mergeIndexes.size());
+      int threadsToUse = MiscConfig::Instance().PackGenAnalysisThreads;
+      levInputs.resize(mergeIndexes.size() * 2 + 1);
+      levInputVers.resize(mergeIndexes.size() * 2 + 1);
+
+      // Run the following loop in parallel using the amount of threads set in misc.xml.
+      #pragma omp parallel for schedule(static) num_threads(threadsToUse)
+      for (size_t merge_idx = 0; merge_idx < mergeIndexes.size(); ++merge_idx) {
+        const InsetInfo<ProductAssetVersion> &inset(*extra.insetInfo[mergeIndexes[merge_idx]]);
+        const PacketGenInfo &genInfo(*extra.genInfo[mergeIndexes[merge_idx]]);
+        int inputs_idx = merge_idx*2;
+        levInputs[inputs_idx] = (inset.combinedrp_).Ref();
+        levInputVers[inputs_idx] = inset.combinedrp_;
+        AssetVersion blendVer;
+
+        if (!inset.alphaRPFile.empty() &&
+            (genInfo.packetLevels.size() > minifySrcLevel)) {
+          blendVer = genInfo.packetLevels[minifySrcLevel];
+        }
+
+        SharedString cached_blend;
+        SharedString cached_blend_alpha;
+        if (blendVer) {
+          // This covers two cases:
+          // 1) If level+1 == config.endMinifyLevel:
+          //   This is the first merge (from cached blends)
+          //   It is possible that some of the cached blends are only
+          //   partially populated. So we pull from both the cached
+          //   blend and the product.
+          // 2) Otherwise:
+          //   This is a subsequent merge (from cached merges) It's
+          //   possible that earlier merges also short circuited the
+          //   merge with opaque top tiles. So we may need to pull
+          //   from the product too.
+          // If we do not enter this if statment, then
+          // this inset doesn't have a cached blend file. This
+          // will only happen for things that have no alpha mask.
+          // In these cases we pull directly from the product. It
+          // will also happen for the last thing on the stack who
+          // hasn't had his blendvers filled in yet.
+          levInputs[inputs_idx+1] = blendVer.Ref();
+          levInputVers[inputs_idx+1] = blendVer;
+          cached_blend_alpha = blendVer.Ref();
+          cached_blend = blendVer.Ref();
+        }
+        packetLevelConfig.insets[merge_idx] =
+            PacketLevelConfig::Inset(
+                inset.dataRPFile,
+                inset.alphaRPFile,
+                cached_blend,
+                cached_blend_alpha);
+      }
+
+      if (config.cacheRaster) {
+        // If I've cached my raster blends, I should
+        // start by trying to minify from them
+        if (kids.empty()) {
+          throw khException
+            (kh::tr("Internal Error: No kids to minify"));
+        }
+        AssetVersion prevLevelVer(kids.back());
+
+        levInputs.back() = prevLevelVer.Ref();
+        levInputVers.back() = prevLevelVer;
+
+        packetLevelConfig.insets.push_back
+          (PacketLevelConfig::Inset(
+              std::string() /* dataRP */,
+              std::string() /* alphaRP */,
+              prevLevelVer.Ref(), /* cached blend */
+              prevLevelVer.Ref() /* cached blend alpha */));
+      }
+
+      levInputs.erase(std::remove(levInputs.begin(), levInputs.end(), ""), levInputs.end());
+      levInputVers.erase(std::remove(levInputVers.begin(), levInputVers.end(), AssetVersion()), levInputVers.end());
+    }
+
+    // get child asset ver
+    char subname[32];
+    snprintf(subname, sizeof(subname), "packlevel%02d", level);
+    MutableAssetVersionD packLevelVer =
+      ReuseOrMakeAndUpdateSubAsset<PacketLevelType>
+      (assetRef, type,
+       subname,
+       levInputs,
+       khMetaData(),
+       packetLevelConfig,
+       levInputVers);
+
+    kids.push_back(packLevelVer);
+
+  } // foreach level
+
+  AddChildren(kids);
+}
+
+template PacketGenAssetVersionD
+PacketGenAssetImplD::MyUpdate<RasterProductAssetVersion>(bool &needed, const PacketGenExtraUpdateArg<RasterProductAssetVersion> &extra) const;
+template PacketGenAssetVersionD
+PacketGenAssetImplD::MyUpdate<MercatorRasterProductAssetVersion>(bool &needed, const PacketGenExtraUpdateArg<MercatorRasterProductAssetVersion> &extra) const;

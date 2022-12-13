@@ -1,0 +1,1 @@
+The files in this directory are used to package and install the fusion tutorial source files. Due to size constraints they are not included in the repo. In order to build, first download the files using `./FusionTutorial/download_tutorial.sh` and place them directly into the `FusionTutorial` directory.

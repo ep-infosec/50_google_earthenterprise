@@ -1,0 +1,91 @@
+// Copyright 2017 Google Inc.
+// Copyright 2020 The Open GEE Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <cstdint>
+#include <searchtabs/.idl/SearchTabs.h>
+#include <autoingest/.idl/storage/AssetDefs.h>
+
+#cppquote
+#include <searchtabs/.idl/SearchTabs_impl.h>
+#include <khException.h>
+#/cppquote
+
+class SearchTabSet
+{
+#pragma LoadAndSave
+
+  class Tab {
+    std::uint32_t id_;
+    SearchTabDefinition definition_;
+  };
+
+  std::vector<SearchTabSet::Tab> tabs_ = std::vector<SearchTabSet::Tab>();
+  std::uint32_t           next_tab_id_ = std::uint32_t(1);
+
+#hquote
+  QString SearchTabsFilename(void);
+  bool Load(void);
+  bool Save(void);
+  SearchTabDefinition FindByIdOrThrow(std::uint32_t id);
+#/hquote
+
+#cppquote
+#include <autoingest/geAssetRoot.h>
+#include <khFileUtils.h>
+
+  QString
+  SearchTabSet::SearchTabsFilename(void)
+  {
+    return khComposePath(geAssetRoot::Dirname(AssetDefs::AssetRoot(),
+                                              geAssetRoot::UserDataDir),
+                         "searchtabs.xml").c_str();
+  }
+  
+  bool
+  SearchTabSet::Load(void)
+  {
+    QString filename = SearchTabsFilename();
+    if (!khExists(filename.toUtf8().constData())) {
+      // missing file is not an error
+      return true;
+    }
+    bool retval = Load(filename.ascii());
+    return retval;
+  }
+
+  bool
+  SearchTabSet::Save(void)
+  {
+    QString filename = SearchTabsFilename();
+    if (Save(filename.toUtf8().constData())) {
+      khChmod(filename.toUtf8().constData(), 0666); // in case the umask trimmed any permissions
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  SearchTabDefinition SearchTabSet::FindByIdOrThrow(std::uint32_t id) {
+    for (unsigned int i = 0; i < tabs_.size(); ++i) {
+      if (tabs_[i].id_ == id) {
+        return tabs_[i].definition_;
+      }
+    }
+    throw khException(kh::tr("Unable to find search tab with id = %1")
+                      .arg(id));
+  }
+#/cppquote
+};
+

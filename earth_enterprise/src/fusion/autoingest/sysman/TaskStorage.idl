@@ -1,0 +1,122 @@
+// Copyright 2017 Google Inc.
+// Copyright 2020 The Open GEE Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+#include <string>
+#include <vector>
+#include <cstdint>
+#include <khstrconv.h>
+#include <khException.h>
+#include <khFileUtils.h>
+#include "fusion/autoingest/AssetVersion.h"
+
+class TaskDef {
+  class Input {
+    std::string path; // netpath
+  };
+  class Output {
+    std::string path; // default outpath (relative to asset root)
+    std::uint64_t      sizeEstimate;
+  };
+
+  std::string              taskName;
+  std::vector<Input>       inputs;
+  std::vector<Output>      outputs;
+  std::vector<std::vector<std::string> > commands;
+  AssetDefs::Type          assetType;
+
+#pragma NoConstructors
+#hquote
+  TaskDef(const AssetVersionImpl &assetver) : taskName(assetver.PluginName()),
+                                              assetType(assetver.type) {
+    StartNewCommand();
+  }
+
+  void StartNewCommand(void) {
+    commands.resize(commands.size()+1);
+  }
+
+  template <class T>
+  TaskDef& operator<<(const T& t) {
+    commands.back().push_back(ToString(t));
+    return *this;
+  }
+
+  void AddInput(const std::string &path) {
+    if (path.empty() || (!khIsURI(path) && (path[0] != '/'))) {
+      throw khException(kh::tr("Invalid input path '%1'")
+                        .arg(ToQString(path)));
+    }
+    inputs.push_back(Input(path));
+  }
+  void AddInputs(const std::vector<std::string> &paths) {
+    for (std::vector<std::string>::const_iterator p = paths.begin();
+         p != paths.end(); ++p) {
+      if (p->empty() || (!khIsURI(*p) && ((*p)[0] != '/'))) {
+        throw khException(kh::tr("Invalid input path '%1'")
+                          .arg(ToQString(*p)));
+      }
+      inputs.push_back(Input(*p));
+    }
+  }
+  void AddOutput(const std::string &path, std::uint64_t sizeEstimate) {
+    if (path.empty() || (path[0] == '/')) {
+      throw khException(kh::tr("Invalid output path '%1'")
+                        .arg(ToQString(path)));
+    }
+    outputs.push_back(Output(path, sizeEstimate));
+  }
+
+#/hquote
+};
+
+
+class SubmitTaskMsg {
+  std::string verref;
+  std::uint32_t      taskid;
+  std::int32_t       priority;
+  TaskDef     taskdef;
+
+#pragma StrLoadAndSave
+#pragma NoVoidConstructor
+};
+
+class TaskProgressMsg {
+  std::string verref;
+  std::uint32_t      taskid;
+  time_t      beginTime;
+  time_t      progressTime;
+  double      progress;
+
+#pragma StrLoadAndSave
+};
+
+class TaskLostMsg {
+  std::string verref;
+  std::uint32_t      taskid;
+
+#pragma StrLoadAndSave
+};
+
+class TaskDoneMsg {
+  std::string              verref;
+  std::uint32_t                   taskid;
+  bool                     success;
+  time_t                   beginTime;
+  time_t                   endTime;
+  std::vector<std::string> outfiles = std::vector<std::string>();
+
+#pragma StrLoadAndSave
+};
